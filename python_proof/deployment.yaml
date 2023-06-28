@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proof
+spec:
+  selector:
+    matchLabels:
+      app: proof
+  template:
+    metadata:
+      labels:
+        app: proof
+    spec:
+      containers:
+      - name: proof
+        image: fatpat314/proof_api
+        resources:
+          limits:
+            memory: "1064Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 8000

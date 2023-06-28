@@ -2,43 +2,34 @@ import os
 import config
 from dotenv import load_dotenv
 import openai
-from flask import Flask, jsonify, request, session
+from flask import Flask, jsonify, request, session, g
 from flask_jwt_extended import JWTManager, jwt_required, \
                                create_access_token, get_jwt_identity
-from tigerGraph import create_new_patient_vertex, \
-                       check_existing_disease, check_existing_symptom, \
-                       create_new_patient_vertex, user_login, get_user_profile
-import names
-import random
-import threading
-import uuid
+from sqlite import create_db, get_user_info, get_provider_info, insert_data
+import requests, names, random, threading, uuid, json
+import argparse
 
 app = Flask(__name__)
-port = 8000
+#WHAT IF TESTS PROGRAMS
+
 app.config['JWT_SECRET_KEY'] = config.JWT_SECRET_KEY # change this to a random string in production
 # app.config['JWT_TOKEN_LOCATION'] = ['cookies']
 # app.config['JEW_COOKIE_SECURE'] = True
 jwt = JWTManager(app)
 load_dotenv()
-
-# class GPT_data:
-#     def __init__(self, patient, symptoms, diseases):
-#         self.p = []
-#         self.s = []
-#         self.d = []
-
-# GPT = GPT_data([], [], [])
+cloud_url = "http://localhost:6000"
 
 openai.api_key = config.openai_key
 
 @app.route('/', methods = ['GET'])
 def home():
     if(request.method == 'GET'):
-        data = "hello world!"
+        data = "hello Class!"
         return jsonify({'data': data})
 
 @app.route('/register', methods=['POST'])
 def register():
+    # This repeats in the CNM
     data = request.get_json()
     name = data['name']
     username = data['username']
@@ -46,21 +37,73 @@ def register():
     email = data['email']
     DOB = data['DOB']
 
-    create_new_patient_vertex(name, username, password, email, DOB)
+    url = 'http://localhost:6000/register'
+    data = {'name': name, 'username': username,'password': password, 'email': email, 'DOB': DOB}
+    response = requests.post(url, json=data)
+
     return {'message': 'User registrated successfully.'}, 200
+
+@app.route('/provider-register', methods=['POST'])
+def provider_register():
+    # This repeats in the CNM
+    data = request.get_json()
+    name = data['name']
+    email = data['email']
+    password = data['password']
+    specialty = data['specialty']
+
+    url = f'{cloud_url}/provider-register'
+    data = {'name': name, 'email': email, 'password': password, 'specialty': specialty}
+    response = requests.post(url, json=data)
+
+    return {'message': 'User registrated successfully.'}, 200
+
+# @app.route('/register', methods=['POST'])
+# def register():
+#     data = request.get_json()
+#     name = data['name']
+#     username = data['username']
+#     password = data['password']
+#     email = data['email']
+#     DOB = data['DOB']
+
+#     url = 'http://localhost:6000/register'
+#     data = {'name': name, 'username': username,'password': password, 'email': email, 'DOB': DOB}
+#     response = requests.post(url, json=data)
+
+    # return {'message': 'User registrated successfully.'}, 200
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     print("Hello!")
-    email = request.json.get('email', None)
-    password = request.json.get('password', None)
-    result = user_login(email, password)
-    if result == [{'User': []}]:
-        print("RESULT: ", result)
+    email = request.json.get('email')
+    password = request.json.get('password')
+    url = f'{cloud_url}/login'
+    data = {'email': email, 'password': password}
+    response = requests.post(url, json=data)
+    response = response.json()
+    if response == {'User': []}:
+        print("RESULT: ", response)
         return jsonify({"status":"error", "message": "Invalid email or password"}), 401
-    v_id = result[0]['User'][0]['v_id']
+    v_id = response['User'][0]['v_id']
     access_token = create_access_token(identity=v_id)
     return jsonify({'access_token': access_token}), 200
+
+@app.route('/provider-login', methods=['GET', 'POST'])
+def provider_login():
+    email = request.json.get('email')
+    password = request.json.get('password')
+    url = f'{cloud_url}/provider-login'
+    data = {'email': email, 'password': password}
+    response = requests.post(url, json=data)
+    response = response.json()
+    if response == {'User': []}:
+        print("RESULT: ", response)
+        return jsonify({"status":"error", "message": "Invalid email or password"}), 401
+    v_id = response['User'][0]['v_id']
+    access_token = create_access_token(identity=v_id)
+    return jsonify({'access_token': access_token}), 200
+
 
 # FIX THIS ROUTE
 @app.route('/logout', methods=['POST'])
@@ -72,15 +115,23 @@ def logout():
     unset_jwt_cookies(response)
     return response
 
-@app.route('/protected', methods=['GET'])
+@app.route('/profile', methods=['GET', 'POST'])
 @jwt_required()
-def protected():
+def profile():
     try:
         current_user = get_jwt_identity()
-        current_user_info = get_user_profile(current_user)
-        print("USER INFO: ",current_user_info[0]['User'][0]['attributes']['name'])
-        name = current_user_info[0]['User'][0]['attributes']['name']
-        DOB = current_user_info[0]['User'][0]['attributes']['DOB']
+        url = f'{cloud_url}/profile'
+        data = {'identity': current_user}
+        response = requests.post(url, json=data)
+        current_user_info = response.json()
+
+        # Enter current_user_info into shortterm db
+        create_db(current_user_info)
+        # get user info from shortterm DB
+        current_user_id = get_jwt_identity()
+        user_info_list = get_user_info(current_user_id)
+        name = user_info_list[0]
+        DOB = user_info_list[1]
         # Other user profile display info...
 
         return jsonify({'name': f'{name}', 'DOB': f'{DOB}'}), 200
@@ -88,33 +139,150 @@ def protected():
         print(str(e))
         return jsonify({'error': str(e)}), 400
 
+@app.route('/provider-profile', methods=['GET', 'POST'])
+@jwt_required()
+def provider_profile():
+    try:
+        current_user = get_jwt_identity()
+        url = f'{cloud_url}/provider-profile'
+        data = {'identity': current_user}
+        response = requests.post(url, json=data)
+        current_user_info = response.json()
+
+        # Enter current_user_info into shortterm db
+        create_db(current_user_info)
+        # get user info from shortterm DB
+        current_user_id = get_jwt_identity()
+        user_info_list = get_provider_info(current_user_id)
+        name = user_info_list[0]
+        # Other user profile display info...
+
+        return jsonify({'name': f'{name}'}), 200
+    except Exception as e:
+        print(str(e))
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/patient-profile', methods=['GET', 'POST'])
+@jwt_required()
+def patient_profile():
+    try:
+        url = f'{cloud_url}/profile'
+        patient_id = request.json.get('patient_id')
+        data = {'identity': patient_id}
+        response = requests.post(url, json=data)
+        current_patient_info = response.json()
+        insert_data(current_patient_info)
+        user_info_list = get_user_info(patient_id)
+        name = user_info_list[0]
+        DOB = user_info_list[1]
+        return jsonify({'name': f'{name}', 'DOB': f'{DOB}'}), 200
+ 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/add-patient', methods=['GET', 'POST'])
+@jwt_required()
+def add_patient():
+    try:
+        patient_id = request.json.get('input')
+        # print("ID: ", patient_id)
+        care_provider_id = get_jwt_identity()
+        url = f'{cloud_url}/add-patient'
+        data = {'patient': patient_id, 'provider': care_provider_id}
+        response = requests.post(url, json=data)
+        print(response.text)
+        if json.loads(response.text) == {"User": []}:
+            return jsonify(response.json)
+        else:
+            return jsonify(patient_id)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+    
+    return jsonify(data)
+
 
 
 @app.route('/symptoms', methods = ['POST'])
 @jwt_required()
 def symptoms_form():
     patient_id = get_jwt_identity()
-    current_user_info = get_user_profile(patient_id)
+    user_info_list = get_user_info(patient_id)
     print("Patient: ", patient_id)
     symptoms_list_data = request.json.get('symptomsData')
+    json_list_data = json.dumps(symptoms_list_data)
     if(request.method == 'POST'):
-        symptom_id = check_existing_symptom(patient_id, symptoms_list_data)
-        print("!!!!!!!!", symptom_id)
-        DOB = current_user_info[0]['User'][0]['attributes']['DOB']
+        url = f'{cloud_url}/symptoms'
+        data = {'identity': patient_id, 'symptoms': json_list_data}
+        response = requests.post(url, json=data)
+        symptoms_id_list = json.loads(response.json())
+        DOB = user_info_list[1]
         age = 2023 - int(DOB) #change to whatever current year etc  etc
         result = GPT_request(age, symptoms_list_data)
         def run_background_task(result):
             disease_names = GPT_disease_word_search(result)
             disease_list_data = disease_names.split(", ")
-            check_existing_disease(disease_list_data, symptom_id)
+            disease_list_json = json.dumps(disease_list_data)
+            url = f'{cloud_url}/diseases'
+            data = {'diseases': disease_list_json, 'symptoms': json_list_data}
+            response = requests.post(url, json=data)
         background_thread = threading.Thread(target=run_background_task, args=(result))
         background_thread.start()
         print(result)
         return jsonify(result)
-        # check symptoms?
-        # Then you can probably run GPT
-        # And then check diseases
-    # if(request.method == 'POST'):
+
+@app.route('/care-provider-symptoms', methods=['POST'])
+@jwt_required()
+def care_provider_symptoms_form():
+    patient_id = request.json.get('inputValue')
+    user_info_list = get_user_info(patient_id)
+    print("Patient: ", patient_id)
+    symptoms_list_data = request.json.get('symptomsData')
+    json_list_data = json.dumps(symptoms_list_data)
+
+    disease_list_json = None  # Initialize the variable to store disease_list_data
+
+    def run_background_task(result):
+        nonlocal disease_list_json  # Access the outer variable disease_list_data
+        disease_names = GPT_disease_word_search(result)
+        if disease_names.endswith('.'):
+            disease_names = disease_names[:-1]
+        disease_list_data = disease_names.split(", ")
+        disease_list_json = json.dumps(disease_list_data)
+        url = f'{cloud_url}/diseases'
+        data = {'diseases': disease_list_json, 'symptoms': json_list_data}
+        print("symptom_ID's: ", data)
+        response = requests.post(url, json=data)
+
+    if request.method == 'POST':
+        url = f'{cloud_url}/symptoms'
+        data = {'identity': patient_id, 'symptoms': json_list_data}
+        response = requests.post(url, json=data)
+        symptoms_id_list = json.loads(response.json())
+        DOB = user_info_list[1]
+        age = 2023 - int(DOB)  # change to whatever current year etc  etc
+        result = GPT_request(age, symptoms_list_data)
+        background_thread = threading.Thread(target=run_background_task, args=(result,))
+        background_thread.start()
+        background_thread.join()  # Wait for the background thread to finish
+        # print("LIST DATA: ", disease_list_data)  # Print disease_list_data in the outer function
+        return jsonify(result, disease_list_json)
+
+@app.route('/diagnose', methods = ['GET', 'POST'])
+@jwt_required()
+def diagnose():
+    # Add a way to connect Dr with disease
+    care_provider_id = get_jwt_identity()
+    patient_id = request.json.get('patient_id')
+    disease_name = request.json.get('disease_name')
+    print("CP ID: ", care_provider_id)
+    if request.method == 'POST':
+        url = f'{cloud_url}/diagnose'
+        data = {'patient_id': patient_id, 'disease_name': disease_name, 'care_provider_id': care_provider_id}
+        response = requests.post(url, json=data)
+    return jsonify("test")
+
 
 @app.route('/populate', methods = ['POST'])
 def auto_populate_DB():
@@ -160,20 +328,6 @@ def auto_symptoms_form():
 
     return jsonify(symptoms_list_data)
 
-# GPT route
-# @app.route('/home', methods=['GET'])
-# def response():
-#     result = GPT_request()
-#     print(result)
-#     def run_background_task(result):
-#         disease_names = GPT_disease_word_search(result)
-#         disease_list_data = disease_names.split(", ")
-#         check_existing_disease(disease_list_data)
-
-#     background_thread = threading.Thread(target=run_background_task, args=(result))
-#     background_thread.start()
-#     return jsonify(result)
-
 def GPT_request(age, symptoms):
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
@@ -205,6 +359,10 @@ def GPT_disease_word_search(GPT_result):
     return(disease_names)
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
+    args = parser.parse_args()
+    port = args.port
     app.run(host="0.0.0.0", port=port)
 
 # Write a script that gets symptoms from a random disease from GPT, feed the result back into GPT.
