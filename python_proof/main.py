@@ -11,6 +11,7 @@ import argparse
 
 app = Flask(__name__)
 #WHAT IF TESTS PROGRAMS
+#Each object needs to hold all of the information for its relationships. (syptoms know when and who)
 
 app.config['JWT_SECRET_KEY'] = config.JWT_SECRET_KEY # change this to a random string in production
 # app.config['JWT_TOKEN_LOCATION'] = ['cookies']
